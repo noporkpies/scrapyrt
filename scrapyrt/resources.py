@@ -272,3 +272,108 @@ class CrawlResource(ServiceResource):
         if errors:
             response["errors"] = errors
         return response
+
+
+class GenericCrawlResource(ServiceResource):
+    """Represents a generic spider API interface. This differs from the
+        standard crawl resource in that it accepts a simple flat json
+        payload, passing each key-value to the spider in its kwargs.
+    """
+    isLeaf = True
+    allowedMethods = ['GET', 'POST']
+
+    def render_POST(self, request, **kwargs):
+        """
+        :param request:
+            body should contain JSON
+
+        Required keys in JSON posted:
+
+        :spider_name: string
+            name of spider to be scheduled.
+
+        :request: json object
+            request to be scheduled with spider.
+            Note: request must contain url for spider.
+            It may contain kwargs to scrapy request.
+
+        """
+        request_body = request.content.getvalue()
+        try:
+            api_params = json.loads(request_body)
+        except Exception as e:
+            message = "Invalid JSON in POST body. {}"
+            message = message.format(e)
+            # TODO should be integer not string?
+            raise Error('400', message=message)
+
+        log.msg("{}".format(api_params))
+        self.validate_options(api_params)
+        return self.prepare_crawl(api_params, **kwargs)
+
+    def validate_options(self, api_params):
+        if not api_params.get("urls"):
+            raise Error('400', "A list of urls to crawl must be specified.")
+
+    def prepare_crawl(self, api_params, *args, **kwargs):
+        """Schedule given spider with CrawlManager.
+
+        :param dict api_params:
+            arguments needed to find spider and set proper api parameters
+            for crawl (max_requests for example)
+        """
+        spider_name = self.get_spider_name()
+        try:
+            max_requests = api_params['max_requests']
+        except (KeyError, IndexError):
+            max_requests = None
+
+        dfd = self.run_crawl(spider_name, crawl_args=api_params,
+                             max_requests=max_requests, *args, **kwargs)
+        dfd.addCallback(
+            self.prepare_response, request_data=api_params, *args, **kwargs)
+        return dfd
+
+    def run_crawl(self, spider_name, crawl_args=None,
+                  max_requests=None, *args, **kwargs):
+        crawl_manager_cls = load_object(app_settings.CRAWL_MANAGER)
+        manager = crawl_manager_cls(spider_name, {}, max_requests,
+                                    start_requests=True)
+        if crawl_args:
+            kwargs.update(crawl_args)
+        dfd = manager.crawl(*args, **kwargs)
+        return dfd
+
+    def prepare_response(self, result, *args, **kwargs):
+        items = result.get("items")
+        stats = result.get("stats")
+        response = {
+            "status": "ok",
+            "data": {
+                "item_count": len(items),
+                "items": items,
+            },
+        }
+        errors = result.get("errors") or stats.get("log_count/ERROR")
+        if errors:
+            response["errors"] = errors
+        return response
+
+    def get_spider_name(self):
+        """Name of the spider in the scrapy project. Override if necessary"""
+        return 'genericspider'
+
+
+class HeadCrawlResource(GenericCrawlResource):
+    def get_spider_name(self):
+        return 'headspider'
+
+
+class SiteCrawlResource(GenericCrawlResource):
+    def validate_options(self, api_params):
+        if not api_params.get("start_url"):
+            raise Error('400', "A `start_url` value must be provided.")
+
+    def get_spider_name(self):
+        return 'wholesitespider'
+
